@@ -1,0 +1,27 @@
+{
+  "name": "starlink-leaderboard",
+  "version": "1.0.0",
+  "private": true,
+  "description": "WhatsApp bot that counts Starlink kit sales in group chats and posts an all-time leaderboard",
+  "type": "module",
+  "scripts": {
+    "start": "node --env-file=.env src/index.ts",
+    "list-groups": "node --env-file=.env scripts/list-groups.ts",
+    "test": "node --test \"test/**/*.test.ts\""
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.116.0",
+    "@supabase/supabase-js": "^2.112.2",
+    "@whiskeysockets/baileys": "^6.7.16",
+    "pino": "^9.5.0",
+    "qrcode-terminal": "^0.12.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.0",
+    "@types/qrcode-terminal": "^0.12.2",
+    "typescript": "^5.7.0"
+  }
+}

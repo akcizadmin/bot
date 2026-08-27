@@ -1,0 +1,10 @@
+{
+  "admin": { "name": "Dan", "phone": "5215512345678" },
+  "reps": [
+    { "name": "Robert Gonzalez", "crmUserId": "e3827e75-dd61-40f3-aa00-eeb11bff5d9e", "phone": "5215500000001" },
+    { "name": "Manolo Solorza", "crmUserId": "put-crm-user-id-here", "phone": "5215500000002" },
+    { "name": "Andrea Herrera", "crmUserId": "df8829c6-e995-48e6-80fd-b11ad4d307ed", "phone": "5215500000003" },
+    { "name": "Ricardo Cazares", "crmUserId": "put-crm-user-id-here", "phone": "5215500000004" },
+    { "name": "Renata Herrera", "crmUserId": "put-crm-user-id-here", "phone": "5215500000005" }
+  ]
+}

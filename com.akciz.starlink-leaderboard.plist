@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.akciz.starlink-leaderboard</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>--env-file=.env</string>
+    <string>src/index.ts</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/toton/Documents/GitHub/starlink-leaderboard</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>15</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/toton/Library/Logs/starlink-leaderboard.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/toton/Library/Logs/starlink-leaderboard.log</string>
+</dict>
+</plist>

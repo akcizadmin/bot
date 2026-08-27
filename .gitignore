@@ -1,0 +1,12 @@
+node_modules/
+auth/
+data/
+.env
+*.log
+reps.json
+
+# WhatsApp session credentials — never commit, these let someone hijack the linked WhatsApp account
+auth-*/
+
+# OS cruft
+.DS_Store
