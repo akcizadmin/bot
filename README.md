@@ -1,0 +1,2 @@
+# bot
+Scoreboard bot
