@@ -1,7 +1,21 @@
 // Pulls the "Sales rep breakdown — kits sold" numbers from the Akciz Connect
 // CRM (Lovable app, Supabase project qqmivcilgpgzinldpipn), replicating
-// src/components/exec/SalesRepExecPanel.tsx so WhatsApp always matches the
-// dashboard at app.akciz.com.
+// src/lib/kitEvents.ts + src/components/exec/SalesRepExecPanel.tsx so
+// WhatsApp always matches the dashboard at app.akciz.com.
+//
+// 2026-09-20: the CRM moved "kits sold" math from raw opportunities rows to a
+// kit-events timeline (src/lib/kitEvents.ts, commit a060885 on 2026-09-11,
+// wired into the dashboard the same day). Kits added onto an *existing*
+// closed-won deal ("expansion" activation_bundles, label starting with
+// "Expansion") now count on the date the expansion was booked, not the
+// deal's original close date — otherwise a customer who buys 2 kits in March
+// and 3 more in September would have all 5 show up in March forever. This
+// file mirrors that: buildKitEvents()/fetchKitEvents() replace the old direct
+// opportunities query, and computeBreakdown() now consumes KitEvent rows.
+//
+// WEEKLY_KIT_OVERRIDES also mirrors the CRM's KitsExecHeader.tsx, which is
+// empty now that the Robert Gonzalez kit-count cleanup landed. Keep both
+// empty together, or both updated together if a cap is ever needed again.
 import { createClient } from '@supabase/supabase-js';
 import { config } from './config.ts';
 
@@ -20,11 +34,30 @@ export interface Breakdown {
   marker: string;
 }
 
+/** One kit-sold event: the base kits at close, or one per expansion bundle. Mirrors src/lib/kitEvents.ts. */
+export interface KitEvent {
+  ownerId: string | null;
+  kits: number;
+  date: Date;
+}
+
 interface OpportunityRow {
+  id: string;
   owner_id: string | null;
   number_of_kits: number | null;
   closed_at: string | null;
   created_at: string | null;
+}
+
+/** activation_bundles rows shaped for expansion detection. Mirrors src/lib/kitEvents.ts's BundleRow. */
+interface ExpansionBundleRow {
+  opportunity_id: string;
+  label: string | null;
+  kit_count: number | null;
+  status: string | null;
+  created_at: string | null;
+  sold_by: string | null;
+  sold_on: string | null;
 }
 
 interface TeamMember {
@@ -33,13 +66,12 @@ interface TeamMember {
   email: string | null;
 }
 
-// Mirrors WEEKLY_KIT_OVERRIDES in the CRM's KitsExecHeader.tsx: display-only
-// caps on "this week" (Robert's weekly count is inflated by back-office
-// opportunity accounting). Keep in sync with the dashboard until the CRM data
-// is cleaned up and the override removed on both sides.
-export const WEEKLY_KIT_OVERRIDES: Record<string, number> = {
-  'e3827e75-dd61-40f3-aa00-eeb11bff5d9e': 5, // Robert Gonzalez
-};
+/**
+ * Mirrors WEEKLY_KIT_OVERRIDES in the CRM's KitsExecHeader.tsx: display-only
+ * caps on "this week". Empty by default, same as the dashboard — weekly kit
+ * totals come straight from the kit-events data.
+ */
+export const WEEKLY_KIT_OVERRIDES: Record<string, number> = {};
 
 export const supabase = createClient(config.supabaseUrl, config.supabaseAnonKey, {
   auth: { persistSession: false, autoRefreshToken: true },
@@ -75,9 +107,98 @@ export function startOfWeek(d: Date): Date {
   return x;
 }
 
+/**
+ * Parse a stored date. A bare "YYYY-MM-DD" (what the Add Kits date box
+ * writes) is read as UTC midnight by `new Date`, which lands in the previous
+ * week/month for anyone west of UTC — so date-only values are built in local
+ * time instead. Mirrors src/lib/kitEvents.ts's parseEventDate.
+ */
+export function parseEventDate(raw: string): Date {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw.trim());
+  return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : new Date(raw);
+}
+
+/** True for an activation_bundles.label that marks an expansion sale. Mirrors src/lib/expansionKits.ts. */
+export function isExpansionBundle(label?: string | null): boolean {
+  return String(label ?? '')
+    .trim()
+    .toLowerCase()
+    .startsWith('expansion');
+}
+
+/**
+ * Splits closed-won deals into kit-sold events: the original kits at the
+ * close date, plus one event per expansion bundle dated when that expansion
+ * was booked. Mirrors src/lib/kitEvents.ts's buildKitEvents exactly so the
+ * bot's totals bucket into the same week/month as the dashboard.
+ */
+export function buildKitEvents(opps: OpportunityRow[], bundles: ExpansionBundleRow[]): KitEvent[] {
+  const byOpp = new Map<string, OpportunityRow>();
+  for (const o of opps) byOpp.set(o.id, o);
+
+  const expansions = new Map<string, { kits: number; events: KitEvent[] }>();
+  for (const b of bundles) {
+    if (b.status === 'cancelled' || !isExpansionBundle(b.label)) continue;
+    const opp = byOpp.get(b.opportunity_id);
+    if (!opp) continue;
+    const kits = Number(b.kit_count) || 0;
+    if (!kits) continue;
+    // Prefer the close date and rep captured when the expansion was booked;
+    // older bundles fall back to the insert time and the deal owner.
+    const d = parseEventDate(b.sold_on ?? b.created_at ?? opp.closed_at ?? opp.created_at ?? '');
+    if (Number.isNaN(d.getTime())) continue;
+    const cur = expansions.get(b.opportunity_id) ?? { kits: 0, events: [] };
+    cur.kits += kits;
+    cur.events.push({ ownerId: b.sold_by ?? opp.owner_id, kits, date: d });
+    expansions.set(b.opportunity_id, cur);
+  }
+
+  const events: KitEvent[] = [];
+  for (const o of opps) {
+    const exp = expansions.get(o.id);
+    const total = Number(o.number_of_kits ?? 0);
+    // Only subtract expansions that are actually reflected in the deal total.
+    const expKits = Math.min(exp?.kits ?? 0, total);
+    const base = total - expKits;
+    const raw = o.closed_at ?? o.created_at;
+    const d = raw ? parseEventDate(raw) : null;
+    if (base > 0 && d && !Number.isNaN(d.getTime())) {
+      events.push({ ownerId: o.owner_id, kits: base, date: d });
+    }
+    if (exp && expKits > 0) {
+      // Scale down proportionally in the (rare) case the deal total lags behind.
+      const factor = expKits / exp.kits;
+      for (const e of exp.events) {
+        const kits = Math.round(e.kits * factor);
+        if (kits > 0) events.push({ ...e, kits });
+      }
+    }
+  }
+  return events;
+}
+
+/** Fetch closed-won deals plus their expansion bundles as a kit event list. Mirrors src/lib/kitEvents.ts's fetchKitEvents. */
+export async function fetchKitEvents(): Promise<KitEvent[]> {
+  await ensureAuthed();
+  const [opps, bundles] = await Promise.all([
+    supabase
+      .from('opportunities')
+      .select('id, owner_id, number_of_kits, closed_at, created_at')
+      .eq('stage', 'closed_won')
+      .eq('is_test', false),
+    supabase
+      .from('activation_bundles')
+      .select('opportunity_id, label, kit_count, status, created_at, sold_by, sold_on')
+      .not('label', 'is', null),
+  ]);
+  if (opps.error) throw new Error(`opportunities query failed: ${opps.error.message}`);
+  if (bundles.error) throw new Error(`activation_bundles query failed: ${bundles.error.message}`);
+  return buildKitEvents((opps.data ?? []) as OpportunityRow[], (bundles.data ?? []) as ExpansionBundleRow[]);
+}
+
 /** Replicates the dashboard's compute(): totals per rep with Former rollup and weekly caps. */
 export function computeBreakdown(
-  rows: OpportunityRow[],
+  rows: KitEvent[],
   names: Map<string, string>,
   now: Date = new Date(),
 ): Breakdown {
@@ -101,14 +222,12 @@ export function computeBreakdown(
   };
 
   for (const row of rows) {
-    const kits = Number(row.number_of_kits ?? 0);
+    const kits = row.kits;
     if (!kits) continue;
-    const raw = row.closed_at ?? row.created_at;
-    if (!raw) continue;
-    const d = new Date(raw);
-    if (Number.isNaN(d.getTime())) continue;
+    const d = row.date;
+    if (!d || Number.isNaN(d.getTime())) continue;
 
-    const rep = get(row.owner_id ?? 'former');
+    const rep = get(row.ownerId ?? 'former');
     rep.total += kits;
     if (d >= monthStart) rep.month += kits;
     if (d >= weekStart) rep.week += kits;
@@ -125,15 +244,27 @@ export function computeBreakdown(
     { total: 0, month: 0, week: 0 },
   );
 
-  // Marker changes whenever a deal is added, edited, or re-staged.
+  // Marker changes whenever a deal is added, edited, re-staged, or expanded.
   const latest = rows.reduce<string>((max, r) => {
-    const t = r.closed_at ?? r.created_at ?? '';
+    const t = r.date.toISOString();
     return t > max ? t : max;
   }, '');
-  const totalKits = rows.reduce((sum, r) => sum + Number(r.number_of_kits ?? 0), 0);
+  const totalKits = rows.reduce((sum, r) => sum + r.kits, 0);
   const marker = `${rows.length}:${totalKits}:${latest}`;
 
   return { reps, team, marker };
+}
+
+export async function fetchBreakdown(): Promise<Breakdown> {
+  await ensureAuthed();
+  const [events, team] = await Promise.all([fetchKitEvents(), supabase.rpc('list_team')]);
+  if (team.error) throw new Error(`list_team query failed: ${team.error.message}`);
+
+  const names = new Map<string, string>();
+  for (const m of (team.data ?? []) as TeamMember[]) {
+    if (m?.user_id) names.set(m.user_id, m.display_name || m.email || 'Unknown rep');
+  }
+  return computeBreakdown(events, names);
 }
 
 // ---------------------------------------------------------------------------
@@ -325,24 +456,4 @@ export async function fetchActivationStats(): Promise<ActivationStats> {
     realActs,
     names,
   );
-}
-
-export async function fetchBreakdown(): Promise<Breakdown> {
-  await ensureAuthed();
-  const [opps, team] = await Promise.all([
-    supabase
-      .from('opportunities')
-      .select('owner_id, number_of_kits, closed_at, created_at')
-      .eq('stage', 'closed_won')
-      .eq('is_test', false),
-    supabase.rpc('list_team'),
-  ]);
-  if (opps.error) throw new Error(`opportunities query failed: ${opps.error.message}`);
-  if (team.error) throw new Error(`list_team query failed: ${team.error.message}`);
-
-  const names = new Map<string, string>();
-  for (const m of (team.data ?? []) as TeamMember[]) {
-    if (m?.user_id) names.set(m.user_id, m.display_name || m.email || 'Unknown rep');
-  }
-  return computeBreakdown((opps.data ?? []) as OpportunityRow[], names);
 }
