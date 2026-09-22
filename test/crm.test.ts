@@ -7,7 +7,7 @@ process.env.SUPABASE_URL = 'https://example.supabase.co';
 process.env.SUPABASE_ANON_KEY = 'test-key';
 process.env.CRM_BOT_EMAIL = 'bot@test.local';
 process.env.CRM_BOT_PASSWORD = 'test-password';
-const { computeBreakdown, computeActivationStats, startOfWeek, WEEKLY_KIT_OVERRIDES } =
+const { computeBreakdown, buildKitEvents, computeActivationStats, startOfWeek, WEEKLY_KIT_OVERRIDES } =
   await import('../src/crm.ts');
 const { shouldPost, newlyLiveIds } = await import('../src/watcher.ts');
 const { renderLeaderboard, renderActivationBoard } = await import('../src/leaderboard.ts');
@@ -24,10 +24,10 @@ const NAMES = new Map([
 
 test('computes total / month / week windows like the dashboard', () => {
   const rows = [
-    { owner_id: 'rep-a', number_of_kits: 10, closed_at: iso(2026, 3, 1), created_at: null }, // April — total only
-    { owner_id: 'rep-a', number_of_kits: 3, closed_at: iso(2026, 7, 2), created_at: null },  // Aug 2 (Sun) — month, not week
-    { owner_id: 'rep-a', number_of_kits: 2, closed_at: iso(2026, 7, 5), created_at: null },  // Aug 5 (Wed) — month + week
-    { owner_id: 'rep-b', number_of_kits: 7, closed_at: null, created_at: iso(2026, 7, 4) },  // falls back to created_at
+    { ownerId: 'rep-a', kits: 10, date: new Date(iso(2026, 3, 1)) }, // April — total only
+    { ownerId: 'rep-a', kits: 3, date: new Date(iso(2026, 7, 2)) },  // Aug 2 (Sun) — month, not week
+    { ownerId: 'rep-a', kits: 2, date: new Date(iso(2026, 7, 5)) },  // Aug 5 (Wed) — month + week
+    { ownerId: 'rep-b', kits: 7, date: new Date(iso(2026, 7, 4)) },
   ];
   const b = computeBreakdown(rows, NAMES, NOW);
   const robert = b.reps.find((r) => r.name === 'Robert Gonzalez');
@@ -39,24 +39,35 @@ test('computes total / month / week windows like the dashboard', () => {
 
 test('unknown owners and Taisha roll up into a single Former line', () => {
   const rows = [
-    { owner_id: 'rep-t', number_of_kits: 2, closed_at: iso(2026, 5, 1), created_at: null }, // Taisha
-    { owner_id: 'ghost', number_of_kits: 1, closed_at: iso(2026, 5, 2), created_at: null }, // not in team list
-    { owner_id: null, number_of_kits: 4, closed_at: iso(2026, 5, 3), created_at: null },    // unassigned
+    { ownerId: 'rep-t', kits: 2, date: new Date(iso(2026, 5, 1)) }, // Taisha
+    { ownerId: 'ghost', kits: 1, date: new Date(iso(2026, 5, 2)) }, // not in team list
+    { ownerId: null, kits: 4, date: new Date(iso(2026, 5, 3)) },    // unassigned
   ];
   const b = computeBreakdown(rows, NAMES, NOW);
   assert.equal(b.reps.length, 1);
   assert.deepEqual(b.reps[0], { id: 'former', name: 'Former', total: 7, month: 0, week: 0 });
 });
 
-test('weekly override caps this-week for the configured rep', () => {
-  const [overrideId] = Object.keys(WEEKLY_KIT_OVERRIDES);
-  const names = new Map([[overrideId, 'Robert Gonzalez']]);
-  const rows = [
-    { owner_id: overrideId, number_of_kits: 9, closed_at: iso(2026, 7, 5), created_at: null }, // in-week
-  ];
-  const b = computeBreakdown(rows, names, NOW);
-  assert.equal(b.reps[0].week, WEEKLY_KIT_OVERRIDES[overrideId]); // capped at 5, not 9
-  assert.equal(b.reps[0].total, 9); // total untouched
+test('weekly overrides are empty by default, matching the dashboard (KitsExecHeader.tsx)', () => {
+  // The CRM cleared this once Robert's kit-count data was fixed — the bot's
+  // copy has to stay empty too, or its "this week" number silently diverges
+  // from what app.akciz.com shows.
+  assert.deepEqual(WEEKLY_KIT_OVERRIDES, {});
+  const rows = [{ ownerId: 'rep-a', kits: 9, date: new Date(iso(2026, 7, 5)) }]; // in-week
+  const b = computeBreakdown(rows, NAMES, NOW);
+  assert.equal(b.reps[0].week, 9); // nothing configured — no cap applied
+});
+
+test('weekly override mechanism still caps this-week if a rep is ever configured again', () => {
+  WEEKLY_KIT_OVERRIDES['rep-a'] = 5;
+  try {
+    const rows = [{ ownerId: 'rep-a', kits: 9, date: new Date(iso(2026, 7, 5)) }]; // in-week
+    const b = computeBreakdown(rows, NAMES, NOW);
+    assert.equal(b.reps[0].week, 5); // capped
+    assert.equal(b.reps[0].total, 9); // total untouched
+  } finally {
+    delete WEEKLY_KIT_OVERRIDES['rep-a'];
+  }
 });
 
 test('startOfWeek is Monday 00:00', () => {
@@ -66,10 +77,10 @@ test('startOfWeek is Monday 00:00', () => {
 });
 
 test('marker moves when deals change; shouldPost gates correctly', () => {
-  const rows = [{ owner_id: 'rep-a', number_of_kits: 3, closed_at: iso(2026, 7, 2), created_at: null }];
+  const rows = [{ ownerId: 'rep-a', kits: 3, date: new Date(iso(2026, 7, 2)) }];
   const before = computeBreakdown(rows, NAMES, NOW).marker;
   const after = computeBreakdown(
-    [...rows, { owner_id: 'rep-b', number_of_kits: 1, closed_at: iso(2026, 7, 6), created_at: null }],
+    [...rows, { ownerId: 'rep-b', kits: 1, date: new Date(iso(2026, 7, 6)) }],
     NAMES,
     NOW,
   ).marker;
@@ -77,6 +88,73 @@ test('marker moves when deals change; shouldPost gates correctly', () => {
   assert.equal(shouldPost(null, before), false); // first run: silent
   assert.equal(shouldPost(before, before), false); // unchanged: silent
   assert.equal(shouldPost(before, after), true); // new deal: post
+});
+
+// ---------------------------------------------------------------------------
+// buildKitEvents — mirrors src/lib/kitEvents.ts. This is the piece that was
+// missing entirely before: expansion kits (bought after the deal's original
+// close) need to land in the week/month they were actually sold, not the
+// close date, or the bot's numbers quietly drift from the dashboard's.
+// ---------------------------------------------------------------------------
+
+test('buildKitEvents dates expansion kits by when the expansion was booked, not the original close', () => {
+  const opps = [
+    { id: 'opp-1', owner_id: 'rep-a', number_of_kits: 5, closed_at: iso(2026, 2, 1), created_at: null }, // closed March 1
+  ];
+  const bundles = [
+    {
+      opportunity_id: 'opp-1',
+      label: 'Expansion +3 kits',
+      kit_count: 3,
+      status: 'scheduled',
+      created_at: iso(2026, 7, 1),
+      sold_by: null,
+      sold_on: '2026-08-02',
+    },
+  ];
+  const events = buildKitEvents(opps, bundles);
+  assert.equal(events.length, 2);
+  const base = events.find((e) => e.kits === 2);
+  const exp = events.find((e) => e.kits === 3);
+  assert.ok(base, 'base event (5 - 3 expansion kits) present');
+  assert.ok(exp, 'expansion event present');
+  assert.equal(base!.date.getMonth(), 2); // still March — the original close date
+  assert.deepEqual([exp!.date.getFullYear(), exp!.date.getMonth(), exp!.date.getDate()], [2026, 7, 2]); // sold_on, parsed as local Aug 2
+  assert.equal(exp!.ownerId, 'rep-a'); // sold_by unset — falls back to the deal owner
+});
+
+test('buildKitEvents ignores cancelled bundles and bundles that are not expansions', () => {
+  const opps = [{ id: 'opp-1', owner_id: 'rep-a', number_of_kits: 4, closed_at: iso(2026, 7, 1), created_at: null }];
+  const bundles = [
+    { opportunity_id: 'opp-1', label: 'Expansion +2 kits', kit_count: 2, status: 'cancelled', created_at: iso(2026, 7, 10), sold_by: null, sold_on: null },
+    { opportunity_id: 'opp-1', label: 'Install visit', kit_count: 1, status: 'scheduled', created_at: iso(2026, 7, 10), sold_by: null, sold_on: null },
+  ];
+  const events = buildKitEvents(opps, bundles);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].kits, 4); // neither bundle recognized as a live expansion — full total stays on the close date
+});
+
+test('buildKitEvents scales expansion kits down if bookings exceed the deal total', () => {
+  const opps = [{ id: 'opp-1', owner_id: 'rep-a', number_of_kits: 3, closed_at: iso(2026, 7, 1), created_at: null }];
+  const bundles = [
+    { opportunity_id: 'opp-1', label: 'Expansion +5 kits', kit_count: 5, status: 'scheduled', created_at: iso(2026, 7, 10), sold_by: 'rep-b', sold_on: null },
+  ];
+  const events = buildKitEvents(opps, bundles);
+  // expansion kits are capped at the deal total (3), so no separate base event, and
+  // the expansion event itself is scaled 5 -> 3 rather than double-counting.
+  assert.equal(events.length, 1);
+  assert.equal(events[0].kits, 3);
+  assert.equal(events[0].ownerId, 'rep-b');
+});
+
+test('buildKitEvents skips bundles for opportunities that are not in the closed-won set', () => {
+  const opps = [{ id: 'opp-1', owner_id: 'rep-a', number_of_kits: 2, closed_at: iso(2026, 7, 1), created_at: null }];
+  const bundles = [
+    { opportunity_id: 'opp-unknown', label: 'Expansion +1 kits', kit_count: 1, status: 'scheduled', created_at: iso(2026, 7, 10), sold_by: null, sold_on: null },
+  ];
+  const events = buildKitEvents(opps, bundles);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].kits, 2);
 });
 
 const ACT_LINES = [
@@ -136,8 +214,8 @@ test('renders the activation board with per-kit go-live details and average', ()
 test('renders a readable board', () => {
   const b = computeBreakdown(
     [
-      { owner_id: 'rep-a', number_of_kits: 5, closed_at: iso(2026, 7, 5), created_at: null },
-      { owner_id: 'rep-b', number_of_kits: 3, closed_at: iso(2026, 7, 4), created_at: null },
+      { ownerId: 'rep-a', kits: 5, date: new Date(iso(2026, 7, 5)) },
+      { ownerId: 'rep-b', kits: 3, date: new Date(iso(2026, 7, 4)) },
     ],
     NAMES,
     NOW,
